@@ -47,10 +47,10 @@
 /** Number of dentries for each connection in the control filesystem */
 #define FUSE_CTL_NUM_DENTRIES 5
 
-/** List of active connections */
-extern struct list_head fuse_conn_list;
+/** List of mounted filesystems */
+extern struct list_head fuse_mount_list;
 
-/** Global mutex protecting fuse_conn_list and the control filesystem */
+/** Global mutex protecting fuse_mount_list and the control filesystem */
 extern struct mutex fuse_mutex;
 
 /** Module parameters */
@@ -161,12 +161,13 @@ enum {
 };
 
 struct fuse_conn;
+struct fuse_mount;
 struct fuse_release_args;
 
 /** FUSE specific file data */
 struct fuse_file {
 	/** Fuse connection for this file */
-	struct fuse_conn *fc;
+	struct fuse_mount *fm;
 
 	/* Argument space reserved for release */
 	struct fuse_release_args *release_args;
@@ -251,7 +252,7 @@ struct fuse_args {
 	bool page_replace:1;
 	struct fuse_in_arg in_args[3];
 	struct fuse_arg out_args[2];
-	void (*end)(struct fuse_conn *fc, struct fuse_args *args, int error);
+	void (*end)(struct fuse_mount *fm, struct fuse_args *args, int error);
 };
 
 struct fuse_args_pages {
@@ -360,8 +361,8 @@ struct fuse_req {
 	void *argbuf;
 #endif
 
-	/** fuse_conn this request belongs to */
-	struct fuse_conn *fc;
+	/** fuse_mount this request belongs to */
+	struct fuse_mount *fm;
 };
 
 struct fuse_iqueue;
@@ -496,9 +497,9 @@ struct fuse_fs_context {
 /**
  * A Fuse connection.
  *
- * This structure is created, when the filesystem is mounted, and is
- * destroyed, when the client device is closed and the filesystem is
- * unmounted.
+ * This structure is created, when the root filesystem is mounted, and
+ * is destroyed, when the client device is closed and the last
+ * fuse_mount is destroyed.
  */
 struct fuse_conn {
 	/** Lock protecting accessess to  members of this structure */
@@ -728,18 +729,6 @@ struct fuse_conn {
 	/** Negotiated minor version */
 	unsigned minor;
 
-	/** Entry on the fuse_conn_list */
-	struct list_head entry;
-
-	/** Device ID from super block */
-	dev_t dev;
-
-	/** Dentries in the control filesystem */
-	struct dentry *ctl_dentry[FUSE_CTL_NUM_DENTRIES];
-
-	/** number of dentries used in the above array */
-	int ctl_ndents;
-
 	/** Key for lock owner ID scrambling */
 	u32 scramble_key[4];
 
@@ -749,24 +738,69 @@ struct fuse_conn {
 	/** Called on final put */
 	void (*release)(struct fuse_conn *);
 
+	/** List of device instances belonging to this connection */
+	struct list_head devices;
+
+	/** List of filesystems using this connection */
+	struct list_head mounts;
+};
+
+/**
+ * Represents a mounted filesystem, potentially a submount.
+ *
+ * This object allows sharing a fuse_conn between separate mounts to
+ * allow submounts with dedicated superblocks and thus separate device
+ * IDs.
+ */
+struct fuse_mount {
+	/** Underlying (potentially shared) connection to the FUSE server */
+	struct fuse_conn *fc;
+
+	/** Refcount */
+	refcount_t count;
+
+	/** Device ID from super block */
+	dev_t dev;
+
 	/** Super block for this connection. */
 	struct super_block *sb;
 
 	/** Read/write semaphore to hold when accessing sb. */
 	struct rw_semaphore killsb;
 
-	/** List of device instances belonging to this connection */
-	struct list_head devices;
+	/** Dentries in the control filesystem */
+	struct dentry *ctl_dentry[FUSE_CTL_NUM_DENTRIES];
+
+	/** number of dentries used in the above array */
+	int ctl_ndents;
+
+	/** Entry on the fuse_mount_list */
+	struct list_head entry;
+
+	/** Entry on fc->mounts */
+	struct list_head fc_entry;
 };
 
-static inline struct fuse_conn *get_fuse_conn_super(struct super_block *sb)
+static inline struct fuse_mount *get_fuse_mount_super(struct super_block *sb)
 {
 	return sb->s_fs_info;
 }
 
+static inline struct fuse_conn *get_fuse_conn_super(struct super_block *sb)
+{
+	struct fuse_mount *fm = get_fuse_mount_super(sb);
+	return fm ? fm->fc : NULL;
+}
+
+static inline struct fuse_mount *get_fuse_mount(struct inode *inode)
+{
+	return get_fuse_mount_super(inode->i_sb);
+}
+
 static inline struct fuse_conn *get_fuse_conn(struct inode *inode)
 {
-	return get_fuse_conn_super(inode->i_sb);
+	struct fuse_mount *fm = get_fuse_mount(inode);
+	return fm ? fm->fc : NULL;
 }
 
 static inline struct fuse_inode *get_fuse_inode(struct inode *inode)
@@ -850,7 +884,7 @@ void fuse_read_args_fill(struct fuse_io_args *ia, struct file *file, loff_t pos,
  */
 int fuse_open_common(struct inode *inode, struct file *file, bool isdir);
 
-struct fuse_file *fuse_file_alloc(struct fuse_conn *fc);
+struct fuse_file *fuse_file_alloc(struct fuse_mount *fm);
 void fuse_file_free(struct fuse_file *ff);
 void fuse_finish_open(struct inode *inode, struct file *file);
 
@@ -870,7 +904,7 @@ int fuse_fsync_common(struct file *file, loff_t start, loff_t end,
 /**
  * Notify poll wakeup
  */
-int fuse_notify_poll_wakeup(struct fuse_conn *fc,
+int fuse_notify_poll_wakeup(struct fuse_mount *fm,
 			    struct fuse_notify_poll_wakeup_out *outarg);
 
 /**
@@ -918,8 +952,8 @@ void __exit fuse_ctl_cleanup(void);
 /**
  * Simple request sending that does request allocation and freeing
  */
-ssize_t fuse_simple_request(struct fuse_conn *fc, struct fuse_args *args);
-int fuse_simple_background(struct fuse_conn *fc, struct fuse_args *args,
+ssize_t fuse_simple_request(struct fuse_mount *fm, struct fuse_args *args);
+int fuse_simple_background(struct fuse_mount *fm, struct fuse_args *args,
 			   gfp_t gfp_flags);
 
 /**
@@ -959,11 +993,26 @@ void fuse_conn_init(struct fuse_conn *fc, struct user_namespace *user_ns,
  */
 void fuse_conn_put(struct fuse_conn *fc);
 
+/**
+ * Acquire reference to fuse_mount
+ */
+struct fuse_mount *fuse_mount_get(struct fuse_mount *fm);
+
+/**
+ * Initialize fuse_mount for a given fuse_conn
+ */
+void fuse_mount_init(struct fuse_mount *fm, struct fuse_conn *fc);
+
+/**
+ * Release reference to fuse_mount
+ */
+void fuse_mount_put(struct fuse_mount *fm);
+
 struct fuse_dev *fuse_dev_alloc_install(struct fuse_conn *fc);
 struct fuse_dev *fuse_dev_alloc(void);
 void fuse_dev_install(struct fuse_dev *fud, struct fuse_conn *fc);
 void fuse_dev_free(struct fuse_dev *fud);
-void fuse_send_init(struct fuse_conn *fc);
+void fuse_send_init(struct fuse_mount *fm);
 
 /**
  * Fill in superblock and initialize fuse connection
@@ -982,12 +1031,12 @@ void fuse_kill_sb_anon(struct super_block *sb);
 /**
  * Add connection to control filesystem
  */
-int fuse_ctl_add_conn(struct fuse_conn *fc);
+int fuse_ctl_add_conn(struct fuse_mount *fm);
 
 /**
  * Remove connection from control filesystem
  */
-void fuse_ctl_remove_conn(struct fuse_conn *fc);
+void fuse_ctl_remove_conn(struct fuse_mount *fm);
 
 /**
  * Is file type valid?
@@ -1031,7 +1080,7 @@ int fuse_reverse_inval_inode(struct super_block *sb, u64 nodeid,
 int fuse_reverse_inval_entry(struct super_block *sb, u64 parent_nodeid,
 			     u64 child_nodeid, struct qstr *name);
 
-int fuse_do_open(struct fuse_conn *fc, u64 nodeid, struct file *file,
+int fuse_do_open(struct fuse_mount *fm, u64 nodeid, struct file *file,
 		 bool isdir);
 
 /**

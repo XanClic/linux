@@ -1035,7 +1035,8 @@ static const struct fuse_iqueue_ops virtio_fs_fiq_ops = {
 
 static int virtio_fs_fill_super(struct super_block *sb)
 {
-	struct fuse_conn *fc = get_fuse_conn_super(sb);
+	struct fuse_mount *fm = get_fuse_mount_super(sb);
+	struct fuse_conn *fc = fm->fc;
 	struct virtio_fs *fs = fc->iq.priv;
 	unsigned int i;
 	int err;
@@ -1090,7 +1091,7 @@ static int virtio_fs_fill_super(struct super_block *sb)
 
 	/* Previous unmount will stop all queues. Start these again */
 	virtio_fs_start_all_queues(fs);
-	fuse_send_init(fc);
+	fuse_send_init(fm);
 	mutex_unlock(&virtio_fs_mutex);
 	return 0;
 
@@ -1135,9 +1136,10 @@ static void virtio_kill_sb(struct super_block *sb)
 static int virtio_fs_test_super(struct super_block *sb,
 				struct fs_context *fsc)
 {
-	struct fuse_conn *fc = fsc->s_fs_info;
+	struct fuse_mount *fsc_fm = fsc->s_fs_info;
+	struct fuse_mount *sb_fm = get_fuse_mount_super(sb);
 
-	return fc->iq.priv == get_fuse_conn_super(sb)->iq.priv;
+	return fsc_fm->fc->iq.priv == sb_fm->fc->iq.priv;
 }
 
 static int virtio_fs_set_super(struct super_block *sb,
@@ -1147,7 +1149,7 @@ static int virtio_fs_set_super(struct super_block *sb,
 
 	err = get_anon_bdev(&sb->s_dev);
 	if (!err)
-		fuse_conn_get(fsc->s_fs_info);
+		fuse_mount_get(fsc->s_fs_info);
 
 	return err;
 }
@@ -1157,6 +1159,7 @@ static int virtio_fs_get_tree(struct fs_context *fsc)
 	struct virtio_fs *fs;
 	struct super_block *sb;
 	struct fuse_conn *fc;
+	struct fuse_mount *fm;
 	int err;
 
 	/* This gets a reference on virtio_fs object. This ptr gets installed
@@ -1177,14 +1180,26 @@ static int virtio_fs_get_tree(struct fs_context *fsc)
 		return -ENOMEM;
 	}
 
+	fm = kzalloc(sizeof(struct fuse_mount), GFP_KERNEL);
+	if (!fm) {
+		mutex_lock(&virtio_fs_mutex);
+		virtio_fs_put(fs);
+		mutex_unlock(&virtio_fs_mutex);
+		kfree(fc);
+		return -ENOMEM;
+	}
+
 	fuse_conn_init(fc, get_user_ns(current_user_ns()), &virtio_fs_fiq_ops,
 		       fs);
 	fc->release = fuse_free_conn;
 	fc->delete_stale = true;
 
-	fsc->s_fs_info = fc;
-	sb = sget_fc(fsc, virtio_fs_test_super, virtio_fs_set_super);
+	fuse_mount_init(fm, fc);
 	fuse_conn_put(fc);
+
+	fsc->s_fs_info = fm;
+	sb = sget_fc(fsc, virtio_fs_test_super, virtio_fs_set_super);
+	fuse_mount_put(fm);
 	if (IS_ERR(sb))
 		return PTR_ERR(sb);
 
