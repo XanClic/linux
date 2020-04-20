@@ -283,7 +283,6 @@ static void virtio_fs_request_dispatch_work(struct work_struct *work)
 	struct fuse_req *req;
 	struct virtio_fs_vq *fsvq = container_of(work, struct virtio_fs_vq,
 						 dispatch_work.work);
-	struct fuse_conn *fc = fsvq->fud->fc;
 	int ret;
 
 	pr_debug("virtio-fs: worker %s called.\n", __func__);
@@ -298,7 +297,7 @@ static void virtio_fs_request_dispatch_work(struct work_struct *work)
 
 		list_del_init(&req->list);
 		spin_unlock(&fsvq->lock);
-		fuse_request_end(fc, req);
+		fuse_request_end(req);
 	}
 
 	/* Dispatch pending requests */
@@ -329,7 +328,7 @@ static void virtio_fs_request_dispatch_work(struct work_struct *work)
 			spin_unlock(&fsvq->lock);
 			pr_err("virtio-fs: virtio_fs_enqueue_req() failed %d\n",
 			       ret);
-			fuse_request_end(fc, req);
+			fuse_request_end(req);
 		}
 	}
 }
@@ -490,7 +489,6 @@ static void virtio_fs_requests_done_work(struct work_struct *work)
 	struct virtio_fs_vq *fsvq = container_of(work, struct virtio_fs_vq,
 						 done_work);
 	struct fuse_pqueue *fpq = &fsvq->fud->pq;
-	struct fuse_conn *fc = fsvq->fud->fc;
 	struct virtqueue *vq = fsvq->vq;
 	struct fuse_req *req;
 	struct fuse_args_pages *ap;
@@ -543,7 +541,7 @@ static void virtio_fs_requests_done_work(struct work_struct *work)
 		list_del_init(&req->list);
 		spin_unlock(&fpq->lock);
 
-		fuse_request_end(fc, req);
+		fuse_request_end(req);
 		spin_lock(&fsvq->lock);
 		dec_in_flight_req(fsvq);
 		spin_unlock(&fsvq->lock);
