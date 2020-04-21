@@ -727,6 +727,9 @@ struct fuse_conn {
 	/* fuse_attr.flags is present and valid */
 	unsigned int attr_flags:1;
 
+	/* Auto-mount submounts announced by the server */
+	unsigned int auto_submounts:1;
+
 	/** The number of requests waiting for completion */
 	atomic_t num_waiting;
 
