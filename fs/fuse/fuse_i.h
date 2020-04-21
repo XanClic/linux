@@ -1015,11 +1015,15 @@ void fuse_dev_free(struct fuse_dev *fud);
 void fuse_send_init(struct fuse_mount *fm);
 
 /**
- * Fill in superblock and initialize fuse connection
+ * Fill in superblock and initialize fuse connection for root mounts.
  * @sb: partially-initialized superblock to fill in
- * @ctx: mount context
+ * @ctx: mount context (for root mounts)
+ * @submount_finode: For submounts: The fuse_inode of the parent
+ *                   filesystem where this submount is mounted
+ *		     (NULL for root mounts)
  */
-int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx);
+int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx,
+			   struct fuse_inode *submount_finode);
 
 /**
  * Disassociate fuse connection from superblock and kill the superblock

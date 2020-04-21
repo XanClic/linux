@@ -1075,7 +1075,7 @@ static int virtio_fs_fill_super(struct super_block *sb)
 	}
 
 	ctx.fudptr = (void **)&fs->vqs[VQ_REQUEST].fud;
-	err = fuse_fill_super_common(sb, &ctx);
+	err = fuse_fill_super_common(sb, &ctx, NULL);
 	if (err < 0)
 		goto err_free_fuse_devs;
 
