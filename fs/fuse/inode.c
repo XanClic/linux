@@ -1140,9 +1140,32 @@ void fuse_dev_free(struct fuse_dev *fud)
 }
 EXPORT_SYMBOL_GPL(fuse_dev_free);
 
-int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx)
+static void fuse_fill_attr_from_inode(struct fuse_attr *attr,
+				      const struct fuse_inode *fi)
 {
-	struct fuse_dev *fud;
+	*attr = (struct fuse_attr){
+		.ino		= fi->inode.i_ino,
+		.size		= fi->inode.i_size,
+		.blocks		= fi->inode.i_blocks,
+		.atime		= fi->inode.i_atime.tv_sec,
+		.mtime		= fi->inode.i_mtime.tv_sec,
+		.ctime		= fi->inode.i_ctime.tv_sec,
+		.atimensec	= fi->inode.i_atime.tv_nsec,
+		.mtimensec	= fi->inode.i_mtime.tv_nsec,
+		.ctimensec	= fi->inode.i_ctime.tv_nsec,
+		.mode		= fi->inode.i_mode,
+		.nlink		= fi->inode.i_nlink,
+		.uid		= fi->inode.i_uid.val,
+		.gid		= fi->inode.i_gid.val,
+		.rdev		= fi->inode.i_rdev,
+		.blksize	= 1u << fi->inode.i_blkbits,
+	};
+}
+
+int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx,
+			   struct fuse_inode *submount_finode)
+{
+	struct fuse_dev *fud = NULL;
 	struct fuse_mount *fm = get_fuse_mount_super(sb);
 	struct fuse_conn *fc = fm->fc;
 	struct inode *root;
@@ -1150,12 +1173,16 @@ int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx)
 	int err;
 
 	err = -EINVAL;
+	/* One must be NULL, the other must be non-NULL */
+	if (!ctx == !submount_finode)
+		goto err;
+
 	if (sb->s_flags & SB_MANDLOCK)
 		goto err;
 
 	sb->s_flags &= ~(SB_NOSEC | SB_I_VERSION);
 
-	if (ctx->is_bdev) {
+	if (ctx && ctx->is_bdev) {
 #ifdef CONFIG_BLOCK
 		err = -EINVAL;
 		if (!sb_set_blocksize(sb, ctx->blksize))
@@ -1166,8 +1193,12 @@ int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx)
 		sb->s_blocksize_bits = PAGE_SHIFT;
 	}
 
-	sb->s_subtype = ctx->subtype;
-	ctx->subtype = NULL;
+	if (ctx) {
+		sb->s_subtype = ctx->subtype;
+		ctx->subtype = NULL;
+	} else
+		sb->s_subtype = NULL;
+
 	sb->s_magic = FUSE_SUPER_MAGIC;
 	sb->s_op = &fuse_super_operations;
 	sb->s_xattr = fuse_xattr_handlers;
@@ -1185,9 +1216,11 @@ int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx)
 	if (sb->s_user_ns != &init_user_ns)
 		sb->s_xattr = fuse_no_acl_xattr_handlers;
 
-	fud = fuse_dev_alloc_install(fc);
-	if (!fud)
-		goto err;
+	if (ctx) {
+		fud = fuse_dev_alloc_install(fc);
+		if (!fud)
+			goto err;
+	}
 
 	fm->dev = sb->s_dev;
 	fm->sb = sb;
@@ -1200,18 +1233,26 @@ int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx)
 		fc->dont_mask = 1;
 	sb->s_flags |= SB_POSIXACL;
 
-	fc->default_permissions = ctx->default_permissions;
-	fc->allow_other = ctx->allow_other;
-	fc->user_id = ctx->user_id;
-	fc->group_id = ctx->group_id;
-	fc->max_read = max_t(unsigned, 4096, ctx->max_read);
-	fc->destroy = ctx->destroy;
-	fc->no_control = ctx->no_control;
-	fc->no_force_umount = ctx->no_force_umount;
-	fc->no_mount_options = ctx->no_mount_options;
+	if (ctx) {
+		fc->default_permissions = ctx->default_permissions;
+		fc->allow_other = ctx->allow_other;
+		fc->user_id = ctx->user_id;
+		fc->group_id = ctx->group_id;
+		fc->max_read = max_t(unsigned, 4096, ctx->max_read);
+		fc->destroy = ctx->destroy;
+		fc->no_control = ctx->no_control;
+		fc->no_force_umount = ctx->no_force_umount;
+		fc->no_mount_options = ctx->no_mount_options;
+	}
 
 	err = -ENOMEM;
-	root = fuse_get_root_inode(sb, ctx->rootmode);
+	if (ctx) {
+		root = fuse_get_root_inode(sb, ctx->rootmode);
+	} else {
+		struct fuse_attr root_attr;
+		fuse_fill_attr_from_inode(&root_attr, submount_finode);
+		root = fuse_iget(sb, submount_finode->nodeid, 0, &root_attr, 0, 0);
+	}
 	sb->s_d_op = &fuse_root_dentry_operations;
 	root_dentry = d_make_root(root);
 	if (!root_dentry)
@@ -1221,7 +1262,7 @@ int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx)
 
 	mutex_lock(&fuse_mutex);
 	err = -EINVAL;
-	if (*ctx->fudptr)
+	if (ctx && *ctx->fudptr)
 		goto err_unlock;
 
 	err = fuse_ctl_add_conn(fm);
@@ -1230,7 +1271,8 @@ int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx)
 
 	list_add_tail(&fm->entry, &fuse_mount_list);
 	sb->s_root = root_dentry;
-	*ctx->fudptr = fud;
+	if (ctx)
+		*ctx->fudptr = fud;
 	mutex_unlock(&fuse_mutex);
 	return 0;
 
@@ -1238,7 +1280,8 @@ int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx)
 	mutex_unlock(&fuse_mutex);
 	dput(root_dentry);
  err_dev_free:
-	fuse_dev_free(fud);
+	if (fud)
+		fuse_dev_free(fud);
  err:
 	return err;
 }
@@ -1284,7 +1327,7 @@ static int fuse_fill_super(struct super_block *sb, struct fs_context *fsc)
 	fuse_conn_put(fc);
 	sb->s_fs_info = fm;
 
-	err = fuse_fill_super_common(sb, ctx);
+	err = fuse_fill_super_common(sb, ctx, NULL);
 	if (err)
 		goto err_put_conn;
 	/*
