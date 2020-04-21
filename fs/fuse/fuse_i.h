@@ -94,6 +94,9 @@ struct fuse_inode {
 	/** Version of last attribute change */
 	u64 attr_version;
 
+	/** Host device ID for submount directories */
+	dev_t submount_dev;
+
 	union {
 		/* Write related fields (regular file only) */
 		struct {
@@ -767,6 +770,9 @@ struct fuse_mount {
 
 	/** Read/write semaphore to hold when accessing sb. */
 	struct rw_semaphore killsb;
+
+	/** If a submount, this is the host device ID (0 otherwise) */
+	dev_t submount_dev;
 
 	/** Dentries in the control filesystem */
 	struct dentry *ctl_dentry[FUSE_CTL_NUM_DENTRIES];
