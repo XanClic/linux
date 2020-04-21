@@ -10,6 +10,7 @@
 
 #include <linux/pagemap.h>
 #include <linux/file.h>
+#include <linux/fs_context.h>
 #include <linux/sched.h>
 #include <linux/namei.h>
 #include <linux/slab.h>
@@ -299,6 +300,89 @@ static int fuse_dentry_delete(const struct dentry *dentry)
 	return time_before64(fuse_dentry_time(dentry), get_jiffies_64());
 }
 
+static int fuse_submount_set_super(struct super_block *sb,
+				   struct fs_context *fsc)
+{
+	int err;
+
+	err = get_anon_bdev(&sb->s_dev);
+	if (!err)
+		fuse_mount_get(fsc->s_fs_info);
+
+	return err;
+}
+
+/*
+ * Create a fuse_mount object with a new superblock (with path->dentry
+ * as the root), and return that mount so it can be auto-mounted on
+ * @path.
+ */
+static struct vfsmount *fuse_dentry_automount(struct path *path)
+{
+	struct fs_context *fsc;
+	struct fuse_mount *parent_fm = get_fuse_mount_super(path->mnt->mnt_sb);
+	struct fuse_conn *fc = parent_fm->fc;
+	struct fuse_mount *fm;
+	struct vfsmount *mnt;
+	struct fuse_inode *mp_finode = get_fuse_inode(d_inode(path->dentry));
+	struct super_block *sb;
+	int err;
+
+	fsc = fs_context_for_submount(path->mnt->mnt_sb->s_type, path->dentry);
+	if (IS_ERR(fsc)) {
+		err = PTR_ERR(fsc);
+		goto out;
+	}
+
+	err = -ENOMEM;
+	fm = kzalloc(sizeof(struct fuse_mount), GFP_KERNEL);
+	if (!fm)
+		goto out_put_fsc;
+
+	/* Create new fuse_mount for the existing fuse_conn */
+	fuse_mount_init(fm, fc);
+
+	/* Get (new) superblock for this new fuse_mount */
+	fsc->s_fs_info = fm;
+	sb = sget_fc(fsc, NULL, fuse_submount_set_super);
+	fuse_mount_put(fm);
+	if (IS_ERR(sb)) {
+		err = PTR_ERR(sb);
+		goto out_put_fsc;
+	}
+
+	/* Initialize superblock, making @mp_finode its root */
+	err = fuse_fill_super_common(sb, NULL, mp_finode);
+	if (err)
+		goto out_put_sb;
+
+	sb->s_flags |= SB_ACTIVE;
+	fsc->root = dget(sb->s_root);
+	/* We are done configuring the superblock, so unlock it */
+	up_write(&sb->s_umount);
+
+	/* Create the submount */
+	mnt = vfs_create_mount(fsc);
+	if (IS_ERR(mnt)) {
+		err = PTR_ERR(mnt);
+		goto out_put_fsc;
+	}
+
+	mntget(mnt);
+
+	put_fs_context(fsc);
+	return mnt;
+
+out_put_sb:
+	/* Only jump here when fsc->root is NULL and sb is still locked
+	 * (otherwise put_fs_context() will put the superblock) */
+	deactivate_locked_super(sb);
+out_put_fsc:
+	put_fs_context(fsc);
+out:
+	return ERR_PTR(err);
+}
+
 const struct dentry_operations fuse_dentry_operations = {
 	.d_revalidate	= fuse_dentry_revalidate,
 	.d_delete	= fuse_dentry_delete,
@@ -306,6 +390,7 @@ const struct dentry_operations fuse_dentry_operations = {
 	.d_init		= fuse_dentry_init,
 	.d_release	= fuse_dentry_release,
 #endif
+	.d_automount	= fuse_dentry_automount,
 };
 
 const struct dentry_operations fuse_root_dentry_operations = {

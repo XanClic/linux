@@ -723,6 +723,9 @@ struct fuse_conn {
 	/* Do not show mount options */
 	unsigned int no_mount_options:1;
 
+	/* Auto-mount submounts announced by the server */
+	unsigned int auto_submounts:1;
+
 	/** The number of requests waiting for completion */
 	atomic_t num_waiting;
 

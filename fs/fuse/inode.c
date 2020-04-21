@@ -253,9 +253,11 @@ static void fuse_init_inode(struct inode *inode, struct fuse_attr *attr)
 	if (S_ISREG(inode->i_mode)) {
 		fuse_init_common(inode);
 		fuse_init_file_inode(inode);
-	} else if (S_ISDIR(inode->i_mode))
+	} else if (S_ISDIR(inode->i_mode)) {
 		fuse_init_dir(inode);
-	else if (S_ISLNK(inode->i_mode))
+		if (attr->rdev && get_fuse_conn(inode)->auto_submounts)
+			inode->i_flags |= S_AUTOMOUNT;
+	} else if (S_ISLNK(inode->i_mode))
 		fuse_init_symlink(inode);
 	else if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode) ||
 		 S_ISFIFO(inode->i_mode) || S_ISSOCK(inode->i_mode)) {

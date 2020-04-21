@@ -1193,6 +1193,7 @@ static int virtio_fs_get_tree(struct fs_context *fsc)
 		       fs);
 	fc->release = fuse_free_conn;
 	fc->delete_stale = true;
+	fc->auto_submounts = true;
 
 	fuse_mount_init(fm, fc);
 	fuse_conn_put(fc);
