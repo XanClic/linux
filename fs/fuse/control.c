@@ -164,6 +164,7 @@ static ssize_t fuse_conn_congestion_threshold_write(struct file *file,
 {
 	unsigned val;
 	struct fuse_conn *fc;
+	struct fuse_mount *first_fm = NULL;
 	ssize_t ret;
 
 	ret = fuse_conn_limit_write(file, buf, count, ppos, &val,
@@ -176,13 +177,22 @@ static ssize_t fuse_conn_congestion_threshold_write(struct file *file,
 
 	spin_lock(&fc->bg_lock);
 	fc->congestion_threshold = val;
-	if (fc->sb) {
+
+	/*
+	 * Get any fuse_mount belonging to this fuse_conn; s_bdi is
+	 * shared between all of them
+	 */
+	if (!list_empty(&fc->mounts))
+		first_fm = list_first_entry(&fc->mounts, struct fuse_mount,
+					    fc_entry);
+
+	if (first_fm && first_fm->sb) {
 		if (fc->num_background < fc->congestion_threshold) {
-			clear_bdi_congested(fc->sb->s_bdi, BLK_RW_SYNC);
-			clear_bdi_congested(fc->sb->s_bdi, BLK_RW_ASYNC);
+			clear_bdi_congested(first_fm->sb->s_bdi, BLK_RW_SYNC);
+			clear_bdi_congested(first_fm->sb->s_bdi, BLK_RW_ASYNC);
 		} else {
-			set_bdi_congested(fc->sb->s_bdi, BLK_RW_SYNC);
-			set_bdi_congested(fc->sb->s_bdi, BLK_RW_ASYNC);
+			set_bdi_congested(first_fm->sb->s_bdi, BLK_RW_SYNC);
+			set_bdi_congested(first_fm->sb->s_bdi, BLK_RW_ASYNC);
 		}
 	}
 	spin_unlock(&fc->bg_lock);
@@ -263,14 +273,20 @@ static struct dentry *fuse_ctl_add_dentry(struct dentry *parent,
 int fuse_ctl_add_conn(struct fuse_conn *fc)
 {
 	struct dentry *parent;
+	struct fuse_mount *first_fm;
 	char name[32];
 
 	if (!fuse_control_sb)
 		return 0;
 
+	if (list_empty(&fc->mounts))
+		return 0;
+
+	first_fm = list_first_entry(&fc->mounts, struct fuse_mount, fc_entry);
+	sprintf(name, "%u", first_fm->dev);
+
 	parent = fuse_control_sb->s_root;
 	inc_nlink(d_inode(parent));
-	sprintf(name, "%u", fc->dev);
 	parent = fuse_ctl_add_dentry(parent, fc, name, S_IFDIR | 0500, 2,
 				     &simple_dir_inode_operations,
 				     &simple_dir_operations);
