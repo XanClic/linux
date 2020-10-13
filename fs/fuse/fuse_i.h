@@ -72,6 +72,9 @@ struct fuse_inode {
 	 * and kernel */
 	u64 nodeid;
 
+	/** Persistent file handle */
+	u8 handle[FUSE_FILE_HANDLE_LENGTH];
+
 	/** Number of lookups on this inode */
 	u64 nlookup;
 
@@ -886,6 +889,10 @@ struct inode *fuse_iget(struct super_block *sb, u64 nodeid,
 
 int fuse_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *name,
 		     struct fuse_entry_out *outarg, struct inode **inode);
+
+int fuse_lookup_handle(struct super_block *sb, u64 parent_node_id,
+		       const u8 *parent_handle, const struct qstr *name,
+		       struct fuse_lookup_handle_out *outarg);
 
 /**
  * Send FORGET command

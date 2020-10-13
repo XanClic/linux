@@ -523,6 +523,35 @@ ssize_t fuse_simple_request(struct fuse_mount *fm, struct fuse_args *args)
 	return ret;
 }
 
+ssize_t fuse_simple_handle_request(struct fuse_inode *fi, struct fuse_args *args)
+{
+	struct super_block *sb = fi->inode.i_sb;
+	struct fuse_mount *fm = get_fuse_mount_super(sb);
+	ssize_t ret;
+
+	ret = fuse_simple_request(fm, args);
+	if (ret == -ENOANO) {
+		int err;
+		union {
+			char padding[sizeof(struct fuse_lookup_handle_out) +
+				     FUSE_FILE_HANDLE_LENGTH];
+			struct fuse_lookup_handle_out outarg;
+		} handle;
+
+		err = fuse_lookup_handle(sb, 0, fi->handle, &empty_name,
+					 &handle.outarg);
+		if (err)
+			return -ENOANO;
+
+		fi->nodeid = handle.outarg.nodeid;
+		args->nodeid = handle.outarg.nodeid;
+
+		ret = fuse_simple_request(fm, args);
+	}
+
+	return ret;
+}
+
 static bool fuse_request_queue_background(struct fuse_req *req)
 {
 	struct fuse_mount *fm = req->fm;

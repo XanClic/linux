@@ -499,6 +499,7 @@ enum fuse_opcode {
 	FUSE_COPY_FILE_RANGE	= 47,
 	FUSE_SETUPMAPPING	= 48,
 	FUSE_REMOVEMAPPING	= 49,
+	FUSE_LOOKUP_HANDLE	= 50,
 
 	/* CUSE specific operations */
 	CUSE_INIT		= 4096,
@@ -515,6 +516,7 @@ enum fuse_notify_code {
 	FUSE_NOTIFY_STORE = 4,
 	FUSE_NOTIFY_RETRIEVE = 5,
 	FUSE_NOTIFY_DELETE = 6,
+	FUSE_NOTIFY_INVAL_NODEID = 7,
 	FUSE_NOTIFY_CODE_MAX,
 };
 
@@ -870,6 +872,10 @@ struct fuse_notify_inval_entry_out {
 	uint32_t	padding;
 };
 
+struct fuse_notify_inval_nodeid_out {
+	uint64_t	ino;
+};
+
 struct fuse_notify_delete_out {
 	uint64_t	parent;
 	uint64_t	child;
@@ -955,5 +961,20 @@ struct fuse_removemapping_one {
 
 #define FUSE_REMOVEMAPPING_MAX_ENTRY   \
 		(PAGE_SIZE / sizeof(struct fuse_removemapping_one))
+
+#define FUSE_FILE_HANDLE_LENGTH 64
+
+/*
+ * XXX pseudo-struct
+ * struct fuse_lookup_handle_in {
+ *	uint8_t	parent_handle[];
+ *	char	name[];
+ * };
+ */
+
+struct fuse_lookup_handle_out {
+	uint64_t	nodeid;
+	uint8_t		handle[];
+};
 
 #endif /* _LINUX_FUSE_H */

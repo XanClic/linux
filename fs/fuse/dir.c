@@ -169,6 +169,43 @@ static void fuse_invalidate_entry(struct dentry *entry)
 	fuse_invalidate_entry_cache(entry);
 }
 
+int fuse_lookup_handle(struct super_block *sb, u64 parent_node_id,
+		       const u8 *parent_handle, const struct qstr *name,
+		       struct fuse_lookup_handle_out *outarg)
+{
+	struct fuse_mount *fm = get_fuse_mount_super(sb);
+	static const u8 null_handle[FUSE_FILE_HANDLE_LENGTH]; /* XXX */
+	FUSE_ARGS(args);
+	size_t out_size;
+	int err;
+
+	out_size = sizeof(struct fuse_lookup_handle_out) +
+		FUSE_FILE_HANDLE_LENGTH;
+
+	err = -ENAMETOOLONG;
+	if (name->len > FUSE_NAME_MAX)
+		goto out;
+
+	memset(outarg, 0, out_size);
+	args.opcode = FUSE_LOOKUP_HANDLE;
+	args.nodeid = parent_node_id;
+	args.in_numargs = 2;
+	args.in_args[0].size = FUSE_FILE_HANDLE_LENGTH;
+	args.in_args[0].value = parent_handle ?: null_handle;
+	args.in_args[1].size = name->len + 1;
+	args.in_args[1].value = name->name;
+	args.out_numargs = 1;
+	args.out_args[0].size = out_size;
+	args.out_args[0].value = outarg;
+
+	err = fuse_simple_request(fm, &args);
+	if (err)
+		goto out;
+
+out:
+	return err;
+}
+
 static void fuse_lookup_init(struct fuse_conn *fc, struct fuse_args *args,
 			     u64 nodeid, const struct qstr *name,
 			     struct fuse_entry_out *outarg)
