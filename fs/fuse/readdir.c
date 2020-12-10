@@ -197,8 +197,16 @@ retry:
 		if (IS_ERR(dentry))
 			return PTR_ERR(dentry);
 	}
+	pr_err("%s() on %p\n", __func__, d_inode(dentry));
 	if (!d_in_lookup(dentry)) {
 		struct fuse_inode *fi;
+		int ret;
+		union {
+			char padding[sizeof(struct fuse_lookup_handle_out) +
+				     FUSE_FILE_HANDLE_LENGTH];
+			struct fuse_lookup_handle_out outarg;
+		} handle;
+
 		inode = d_inode(dentry);
 		if (!inode ||
 		    get_node_id(inode) != o->nodeid ||
@@ -217,6 +225,23 @@ retry:
 		fi->nlookup++;
 		spin_unlock(&fi->lock);
 
+		/* FIXME: When should handle_valid be reset? */
+		if (!fi->handle_valid) {
+			ret = fuse_lookup_handle(inode->i_sb, o->nodeid, NULL,
+						 &empty_name, &handle.outarg);
+			if (!ret) {
+				memcpy(fi->handle, handle.outarg.handle,
+				       FUSE_FILE_HANDLE_LENGTH);
+				fi->handle_valid = true;
+			} else
+				pr_err("%s: fuse_lookup_handle() returned error %i\n",
+				       __func__, ret);
+			/* Ignore fuse_lookup_handle() error */
+
+			if (fi->handle_valid)
+				pr_err("%s: Got handle for node %i\n", __func__, (int)o->nodeid);
+		}
+
 		forget_all_cached_acls(inode);
 		fuse_change_attributes(inode, &o->attr,
 				       entry_attr_timeout(o),
@@ -228,7 +253,7 @@ retry:
 	} else {
 		inode = fuse_iget(dir->i_sb, o->nodeid, o->generation,
 				  &o->attr, entry_attr_timeout(o),
-				  attr_version);
+				  attr_version, NULL);
 		if (!inode)
 			inode = ERR_PTR(-ENOMEM);
 
@@ -252,7 +277,6 @@ retry:
 static void fuse_force_forget(struct file *file, u64 nodeid)
 {
 	struct inode *inode = file_inode(file);
-	struct fuse_mount *fm = get_fuse_mount(inode);
 	struct fuse_forget_in inarg;
 	FUSE_ARGS(args);
 
@@ -266,7 +290,7 @@ static void fuse_force_forget(struct file *file, u64 nodeid)
 	args.force = true;
 	args.noreply = true;
 
-	fuse_simple_request(fm, &args);
+	fuse_simple_handle_request(get_fuse_inode(inode), &args);
 	/* ignore errors */
 }
 
@@ -345,7 +369,7 @@ static int fuse_readdir_uncached(struct file *file, struct dir_context *ctx)
 				    FUSE_READDIR);
 	}
 	locked = fuse_lock_inode(inode);
-	res = fuse_simple_request(fm, &ap->args);
+	res = fuse_simple_handle_request(get_fuse_inode(inode), &ap->args);
 	fuse_unlock_inode(inode, locked);
 	if (res >= 0) {
 		if (!res) {

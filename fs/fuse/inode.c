@@ -282,14 +282,23 @@ static void fuse_init_inode(struct inode *inode, struct fuse_attr *attr)
 		struct fuse_lookup_handle_out outarg;
 	} handle;
 
-	if (fm->fc->initialized) {
+	pr_err("%s(0x%p[%i])\n", __func__, inode, (int)fi->nodeid);
+
+	if (fm->fc->initialized && !fi->handle_valid) {
 		err = fuse_lookup_handle(inode->i_sb, fi->nodeid, NULL,
 					 &empty_name, &handle.outarg);
-		if (err)
+		if (err == -ESTALE) {
+			pr_err("New node %i is already stale\n", (int)fi->nodeid);
+		} else if (err)
 			pr_err("fuse_lookup_handle() returned %i\n", err);
-		else
+		else {
 			memcpy(fi->handle, handle.outarg.handle,
 			       FUSE_FILE_HANDLE_LENGTH);
+			fi->handle_valid = true;
+		}
+
+		if (fi->handle_valid)
+			pr_err("%s: Got handle for node %i\n", __func__, (int)fi->nodeid);
 
 		/* FIXME: What to do on error? */
 	}
@@ -332,13 +341,27 @@ static int fuse_inode_set(struct inode *inode, void *_nodeidp)
 	return 0;
 }
 
+static void copy_handle_from_template(struct fuse_inode *fi,
+				      const u8 *template_handle)
+{
+	if (!template_handle || fi->handle_valid)
+		return;
+
+	pr_err("%s: Copying handle from template FI\n", __func__);
+	memcpy(fi->handle, template_handle, FUSE_FILE_HANDLE_LENGTH);
+	fi->handle_valid = true;
+}
+
 struct inode *fuse_iget(struct super_block *sb, u64 nodeid,
 			int generation, struct fuse_attr *attr,
-			u64 attr_valid, u64 attr_version)
+			u64 attr_valid, u64 attr_version,
+			const u8 *template_handle)
 {
 	struct inode *inode;
 	struct fuse_inode *fi;
 	struct fuse_conn *fc = get_fuse_conn_super(sb);
+
+	pr_err("%s(%i)\n", __func__, (int)nodeid);
 
 	/*
 	 * Auto mount points get their node id from the submount root, which is
@@ -349,20 +372,34 @@ struct inode *fuse_iget(struct super_block *sb, u64 nodeid,
 	 */
 	if (fc->auto_submounts && (attr->flags & FUSE_ATTR_SUBMOUNT) &&
 	    S_ISDIR(attr->mode)) {
+		inode = iget5_locked(sb, nodeid, fuse_inode_eq, fuse_inode_set, &nodeid);
+		pr_err("Submounting on: %p\n", inode);
+
 		inode = new_inode(sb);
 		if (!inode)
 			return NULL;
 
-		get_fuse_inode(inode)->nodeid = nodeid;
+		pr_err("Submounted: %p\n", inode);
+
+		fi = get_fuse_inode(inode);
+
+		copy_handle_from_template(fi, template_handle);
+
+		fi->nodeid = nodeid;
 		fuse_init_inode(inode, attr);
 		inode->i_flags |= S_AUTOMOUNT;
 		goto done;
 	}
 
 retry:
+	pr_err("Calling iget5_locked(%p, %i)\n", sb, (int)nodeid);
 	inode = iget5_locked(sb, nodeid, fuse_inode_eq, fuse_inode_set, &nodeid);
+	pr_err(" -> %p\n", inode);
 	if (!inode)
 		return NULL;
+
+	fi = get_fuse_inode(inode);
+	copy_handle_from_template(fi, template_handle);
 
 	if ((inode->i_state & I_NEW)) {
 		inode->i_flags |= S_NOATIME;
@@ -378,7 +415,6 @@ retry:
 		goto retry;
 	}
 done:
-	fi = get_fuse_inode(inode);
 	spin_lock(&fi->lock);
 	fi->nlookup++;
 	spin_unlock(&fi->lock);
@@ -505,6 +541,7 @@ static int fuse_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
 	struct super_block *sb = dentry->d_sb;
 	struct fuse_mount *fm = get_fuse_mount_super(sb);
+	struct fuse_inode *fi = get_fuse_inode(d_inode(dentry));
 	FUSE_ARGS(args);
 	struct fuse_statfs_out outarg;
 	int err;
@@ -517,11 +554,11 @@ static int fuse_statfs(struct dentry *dentry, struct kstatfs *buf)
 	memset(&outarg, 0, sizeof(outarg));
 	args.in_numargs = 0;
 	args.opcode = FUSE_STATFS;
-	args.nodeid = get_node_id(d_inode(dentry));
+	args.nodeid = fi->nodeid;
 	args.out_numargs = 1;
 	args.out_args[0].size = sizeof(outarg);
 	args.out_args[0].value = &outarg;
-	err = fuse_simple_request(fm, &args);
+	err = fuse_simple_handle_request(fi, &args);
 	if (!err)
 		convert_fuse_statfs(buf, &outarg.st);
 	return err;
@@ -771,7 +808,7 @@ static struct inode *fuse_get_root_inode(struct super_block *sb, unsigned mode)
 	attr.mode = mode;
 	attr.ino = FUSE_ROOT_ID;
 	attr.nlink = 1;
-	return fuse_iget(sb, 1, 0, &attr, 0, 0);
+	return fuse_iget(sb, 1, 0, &attr, 0, 0, NULL);
 }
 
 struct fuse_inode_handle {
@@ -798,7 +835,7 @@ static struct dentry *fuse_get_dentry(struct super_block *sb,
 		if (!fc->export_support)
 			goto out_err;
 
-		err = fuse_lookup_name(sb, handle->nodeid, &name, &outarg,
+		err = fuse_lookup_name(sb, handle->nodeid, NULL, &name, &outarg,
 				       &inode);
 		if (err && err != -ENOENT)
 			goto out_err;
@@ -889,6 +926,7 @@ static struct dentry *fuse_fh_to_parent(struct super_block *sb,
 static struct dentry *fuse_get_parent(struct dentry *child)
 {
 	struct inode *child_inode = d_inode(child);
+	struct fuse_inode *child_fi = get_fuse_inode(child_inode);
 	struct fuse_conn *fc = get_fuse_conn(child_inode);
 	struct inode *inode;
 	struct dentry *parent;
@@ -899,7 +937,8 @@ static struct dentry *fuse_get_parent(struct dentry *child)
 	if (!fc->export_support)
 		return ERR_PTR(-ESTALE);
 
-	err = fuse_lookup_name(child_inode->i_sb, get_node_id(child_inode),
+	err = fuse_lookup_name(child_inode->i_sb, child_fi->nodeid,
+			       child_fi->handle_valid ? child_fi->handle : NULL,
 			       &name, &outarg, &inode);
 	if (err) {
 		if (err == -ENOENT)
@@ -1317,7 +1356,8 @@ int fuse_fill_super_submount(struct super_block *sb,
 		return -ENOMEM;
 
 	fuse_fill_attr_from_inode(&root_attr, parent_fi);
-	root = fuse_iget(sb, parent_fi->nodeid, 0, &root_attr, 0, 0);
+	root = fuse_iget(sb, parent_fi->nodeid, 0, &root_attr, 0, 0,
+			 parent_fi->handle_valid ? parent_fi->handle : NULL);
 	/*
 	 * This inode is just a duplicate, so it is not looked up and
 	 * its nlookup should not be incremented.  fuse_iget() does

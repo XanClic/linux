@@ -74,6 +74,7 @@ struct fuse_inode {
 
 	/** Persistent file handle */
 	u8 handle[FUSE_FILE_HANDLE_LENGTH];
+	bool handle_valid;
 
 	/** Number of lookups on this inode */
 	u64 nlookup;
@@ -885,10 +886,12 @@ extern const struct dentry_operations fuse_root_dentry_operations;
  */
 struct inode *fuse_iget(struct super_block *sb, u64 nodeid,
 			int generation, struct fuse_attr *attr,
-			u64 attr_valid, u64 attr_version);
+			u64 attr_valid, u64 attr_version,
+			const u8 *template_handle);
 
-int fuse_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *name,
-		     struct fuse_entry_out *outarg, struct inode **inode);
+int fuse_lookup_name(struct super_block *sb, u64 nodeid, const u8 *handle,
+		     const struct qstr *name, struct fuse_entry_out *outarg,
+		     struct inode **inode);
 
 int fuse_lookup_handle(struct super_block *sb, u64 parent_node_id,
 		       const u8 *parent_handle, const struct qstr *name,
@@ -1003,6 +1006,12 @@ void __exit fuse_ctl_cleanup(void);
  * Simple request sending that does request allocation and freeing
  */
 ssize_t fuse_simple_request(struct fuse_mount *fm, struct fuse_args *args);
+ssize_t fuse_simple_handle_request(struct fuse_inode *fi,
+				   struct fuse_args *args);
+ssize_t fuse_simple_do_handle_request(struct fuse_mount *fm,
+				      struct fuse_args *args,
+				      u64 *nodeid,
+				      const u8 *handle);
 int fuse_simple_background(struct fuse_mount *fm, struct fuse_args *args,
 			   gfp_t gfp_flags);
 
@@ -1140,8 +1149,13 @@ int fuse_reverse_inval_inode(struct fuse_conn *fc, u64 nodeid,
 int fuse_reverse_inval_entry(struct fuse_conn *fc, u64 parent_nodeid,
 			     u64 child_nodeid, struct qstr *name);
 
-int fuse_do_open(struct fuse_mount *fm, u64 nodeid, struct file *file,
-		 bool isdir);
+/**
+ * Perform a FUSE_OPEN or FUSE_OPENDIR operation, as appropriate.
+ *
+ * Specifying fi overrides fm and nodeid.
+ */
+int fuse_do_open(struct fuse_inode *fi, struct fuse_mount *fm, u64 nodeid,
+		 struct file *file, bool isdir);
 
 /**
  * fuse_direct_io() flags
