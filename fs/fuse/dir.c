@@ -1285,6 +1285,37 @@ static int fuse_do_getattr(struct inode *inode, struct kstat *stat,
 	return err;
 }
 
+int fuse_get_rootmode(struct fuse_mount *fm, unsigned *rootmode)
+{
+	int res;
+	struct fuse_getattr_in inarg;
+	struct fuse_attr_out outarg;
+	FUSE_ARGS(args);
+	u64 attr_version;
+
+	attr_version = fuse_get_attr_version(fm->fc);
+
+	memset(&inarg, 0, sizeof(inarg));
+	memset(&outarg, 0, sizeof(outarg));
+	args.opcode = FUSE_GETATTR;
+	args.nodeid = FUSE_ROOT_ID;
+	args.in_numargs = 1;
+	args.in_args[0].size = sizeof(inarg);
+	args.in_args[0].value = &inarg;
+	args.out_numargs = 1;
+	args.out_args[0].size = sizeof(outarg);
+	args.out_args[0].value = &outarg;
+	res = fuse_simple_request(fm, &args);
+	if (!res) {
+		if (fuse_invalid_attr(&outarg.attr))
+			res = -EIO;
+		else
+			*rootmode = outarg.attr.mode;
+	}
+	return res;
+}
+EXPORT_SYMBOL_GPL(fuse_get_rootmode);
+
 static int fuse_update_get_attr(struct inode *inode, struct file *file,
 				struct kstat *stat, u32 request_mask,
 				unsigned int flags)

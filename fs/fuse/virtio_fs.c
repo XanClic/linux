@@ -1418,6 +1418,7 @@ static int virtio_fs_fill_super(struct super_block *sb, struct fs_context *fsc)
 	struct virtio_fs *fs = fc->iq.priv;
 	struct fuse_fs_context *ctx = fsc->fs_private;
 	unsigned int i;
+	unsigned int rootmode;
 	int err;
 
 	virtio_fs_ctx_set_defaults(ctx);
@@ -1454,7 +1455,26 @@ static int virtio_fs_fill_super(struct super_block *sb, struct fs_context *fsc)
 		}
 		ctx->dax_dev = fs->dax_dev;
 	}
+
+	/* Previous unmount will stop all queues. Start these again */
+	virtio_fs_start_all_queues(fs);
+	/*
+	 * Begin sb initialization, fuse_send_init() and process_init_reply()
+	 * need it.  Cannot create the root inode yet, we need to wait for the
+	 * INIT reply to know its inode mode.
+	 */
 	err = fuse_fill_super_common(sb, ctx);
+	if (err < 0)
+		goto err_free_fuse_devs;
+
+	fuse_send_init(fm, true);
+
+	err = fuse_get_rootmode(fm, &rootmode);
+	/* On error, fall back to the default (probably S_IFDIR) */
+	if (err < 0)
+		rootmode = ctx->rootmode;
+
+	err = fuse_make_root_inode(sb, ctx, rootmode);
 	if (err < 0)
 		goto err_free_fuse_devs;
 
@@ -1464,9 +1484,6 @@ static int virtio_fs_fill_super(struct super_block *sb, struct fs_context *fsc)
 		fuse_dev_install(fsvq->fud, fc);
 	}
 
-	/* Previous unmount will stop all queues. Start these again */
-	virtio_fs_start_all_queues(fs);
-	fuse_send_init(fm);
 	mutex_unlock(&virtio_fs_mutex);
 	return 0;
 
