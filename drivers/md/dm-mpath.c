@@ -111,6 +111,21 @@ struct dm_mpath_io {
 	u64 start_time_ns;
 };
 
+struct dm_mpath_probe_result {
+	unsigned int done_semaphore; /* FIXME: Atomic */
+	struct completion all_done;
+	bool any_succeeded; /* FIXME: Atomic */
+};
+
+struct dm_mpath_probe_bio {
+	struct pgpath *pgpath;
+
+	struct page *pages;
+	unsigned int pages_order;
+
+	struct dm_mpath_probe_result *result;
+};
+
 typedef int (*action_fn) (struct pgpath *pgpath);
 
 static struct workqueue_struct *kmultipathd, *kmpath_handlerd;
@@ -2021,6 +2036,134 @@ out:
 	return r;
 }
 
+static void probe_path_endio(struct bio *bio)
+{
+	struct dm_mpath_probe_bio *probe_bio = bio->bi_private;
+	struct dm_mpath_probe_result *result = probe_bio->result;
+
+	/* FIXME: Do we need to check blk_status_to_errno()? */
+	if (blk_path_error(bio->bi_status))
+		fail_path(probe_bio->pgpath);
+	else
+		result->any_succeeded = true; /* FIXME: Atomic */
+
+	if (--result->done_semaphore == 0) /* FIXME: Atomic */
+		complete(&result->all_done);
+
+	__free_pages(probe_bio->pages, probe_bio->pages_order);
+	kfree(probe_bio);
+	bio_put(bio);
+}
+
+static void probe_path(struct pgpath *pgpath,
+		       struct dm_mpath_probe_result *result)
+{
+	struct block_device *bdev = pgpath->path.dev->bdev;
+	struct bio *bio;
+	struct page *pages;
+	unsigned int read_size;
+	unsigned int read_pages;
+	unsigned int pages_order;
+	struct dm_mpath_probe_bio *probe_bio;
+
+	if (!pgpath->is_active)
+		return;
+
+	/* Adhere to the block device and page alignment */
+	read_size = MAX(bdev_logical_block_size(bdev), PAGE_SIZE);
+	read_pages = DIV_ROUND_UP(read_size, PAGE_SIZE);
+	pages_order = __fls(read_pages);
+	/*
+	 * If the logical block size is a power of two (it should be),
+	 * read_pages will be a power of two as well, and so ffs == fls.
+	 * Double-check anyway, round pages_order up if necessary.
+	 */
+	if (pages_order != __ffs(read_pages))
+		pages_order++;
+
+	pages = alloc_pages(GFP_KERNEL, pages_order);
+
+	probe_bio = kmalloc(sizeof(*probe_bio), GFP_KERNEL);
+	*probe_bio = (struct dm_mpath_probe_bio) {
+		.pgpath = pgpath,
+		.pages = pages,
+		.pages_order = pages_order,
+		.result = result,
+	};
+
+	/* Perform a minimal read: Sector 0, length read_size */
+	bio = bio_alloc(bdev, 1, REQ_OP_READ | REQ_SYNC, GFP_KERNEL);
+	bio->bi_iter.bi_sector = 0;
+	bio->bi_private = probe_bio;
+	bio->bi_end_io = probe_path_endio;
+
+	__bio_add_page(bio, pages, read_size, 0);
+
+	result->done_semaphore++; /* FIXME: Atomic */
+	submit_bio(bio);
+
+	return;
+}
+
+static int probe_all_paths(struct multipath *m)
+{
+	struct pgpath *pgpath;
+	struct priority_group *pg;
+	struct dm_mpath_probe_result result = {
+		.done_semaphore = 1,
+		.all_done = COMPLETION_INITIALIZER_ONSTACK(result.all_done),
+		.any_succeeded = false,
+	};
+
+	list_for_each_entry(pg, &m->priority_groups, list) {
+		list_for_each_entry(pgpath, &pg->pgpaths, list) {
+			probe_path(pgpath, &result);
+		}
+	}
+
+	if (--result.done_semaphore > 0) /* FIXME: Atomic */
+		wait_for_completion_io(&result.all_done); /* FIXME: Timeout would be nice */
+
+	if (result.any_succeeded)
+		return -ENOTCONN;
+	else
+		return 0;
+}
+
+static int multipath_block_message(struct dm_target *ti, unsigned int argc,
+				   char **argv, char *result,
+				   unsigned int maxlen)
+{
+	int r = -EINVAL;
+	struct multipath *m = ti->private;
+
+	mutex_lock(&m->work_mutex);
+
+	if (dm_suspended(ti)) {
+		r = -EBUSY;
+		goto out;
+	}
+
+	if (argc != 1) {
+		DMWARN("Invalid multipath block message arguments. "
+		       "Expected 1 argument, got %d.",
+		       argc);
+		goto out;
+	}
+
+	if (!strcasecmp(argv[0], "probe_all_paths")) {
+		r = probe_all_paths(m);
+		goto out;
+	} else {
+		DMWARN("Unrecognized multipath block message received: %s", argv[0]);
+		goto out;
+	}
+
+out:
+	mutex_unlock(&m->work_mutex);
+	return r;
+}
+
 static int multipath_prepare_ioctl(struct dm_target *ti,
 				   struct block_device **bdev)
 {
@@ -2196,6 +2339,7 @@ static struct target_type multipath_target = {
 	.resume = multipath_resume,
 	.status = multipath_status,
 	.message = multipath_message,
+	.block_message = multipath_block_message,
 	.prepare_ioctl = multipath_prepare_ioctl,
 	.iterate_devices = multipath_iterate_devices,
 	.busy = multipath_busy,
