@@ -455,6 +455,9 @@ static int dm_blk_ioctl(struct block_device *bdev, blk_mode_t mode,
 	struct mapped_device *md = bdev->bd_disk->private_data;
 	int r, srcu_idx;
 
+	if (_IOC_TYPE(cmd) == DM_IOCTL)
+		return dm_ioctl(NULL, bdev, cmd, (struct dm_ioctl __user *)arg);
+
 	r = dm_prepare_ioctl(md, &srcu_idx, &bdev);
 	if (r < 0)
 		goto out;
