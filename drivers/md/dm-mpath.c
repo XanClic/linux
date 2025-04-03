@@ -1435,6 +1435,23 @@ static int action_dev(struct multipath *m, dev_t dev, action_fn action)
 	return r;
 }
 
+static int action_all_devs(struct multipath *m, action_fn action)
+{
+	int r = 0;
+	struct pgpath *pgpath;
+	struct priority_group *pg;
+
+	list_for_each_entry(pg, &m->priority_groups, list) {
+		list_for_each_entry(pgpath, &pg->pgpaths, list) {
+			r = action(pgpath);
+			if (r)
+				return r;
+		}
+	}
+
+	return r;
+}
+
 /*
  * Temporarily try to avoid having to use the specified PG
  */
@@ -2021,6 +2038,82 @@ out:
 	return r;
 }
 
+static int probe_path(struct pgpath *pgpath)
+{
+	struct block_device *bdev = pgpath->path.dev->bdev;
+	struct bio *bio;
+	struct page *pages;
+	unsigned int read_size;
+	unsigned int read_pages;
+	unsigned int read_order;
+	blk_status_t status;
+	int ret;
+
+	if (!pgpath->is_active)
+		return 0;
+
+	/* Adhere to the block device and page alignment */
+	read_size = MAX(bdev_logical_block_size(bdev), PAGE_SIZE);
+	read_pages = DIV_ROUND_UP(read_size, PAGE_SIZE);
+	read_order = __fls(read_pages);
+	/*
+	 * If the logical block size is a power of two (it should be),
+	 * read_pages will be a power of two as well, and so ffs == fls.
+	 * Double-check anyway, round read_order up if necessary.
+	 */
+	if (read_order != __ffs(read_pages))
+		read_order++;
+
+	/* Perform a minimal read: Sector 0, length read_size */
+	bio = bio_alloc(bdev, 1, REQ_OP_READ, GFP_KERNEL);
+	pages = alloc_pages(GFP_KERNEL, read_order);
+	bio->bi_iter.bi_sector = 0;
+	__bio_add_page(bio, pages, read_size, 0);
+	ret = submit_bio_wait(bio);
+	status = bio->bi_status;
+	bio_put(bio);
+	__free_pages(pages, read_order);
+
+	if (ret < 0 && blk_path_error(status))
+		fail_path(pgpath);
+
+	return 0;
+}
+
+static int multipath_block_message(struct dm_target *ti, unsigned int argc,
+				   char **argv, char *result,
+				   unsigned int maxlen)
+{
+	int r = -EINVAL;
+	struct multipath *m = ti->private;
+
+	mutex_lock(&m->work_mutex);
+
+	if (dm_suspended(ti)) {
+		r = -EBUSY;
+		goto out;
+	}
+
+	if (argc != 1) {
+		DMWARN("Invalid multipath block message arguments. "
+		       "Expected 1 argument, got %d.",
+		       argc);
+		goto out;
+	}
+
+	if (!strcasecmp(argv[0], "probe_all_paths")) {
+		r = action_all_devs(m, probe_path);
+		goto out;
+	} else {
+		DMWARN("Unrecognized multipath block message received: %s", argv[0]);
+		goto out;
+	}
+
+out:
+	mutex_unlock(&m->work_mutex);
+	return r;
+}
+
 static int multipath_prepare_ioctl(struct dm_target *ti,
 				   struct block_device **bdev)
 {
@@ -2196,6 +2289,7 @@ static struct target_type multipath_target = {
 	.resume = multipath_resume,
 	.status = multipath_status,
 	.message = multipath_message,
+	.block_message = multipath_block_message,
 	.prepare_ioctl = multipath_prepare_ioctl,
 	.iterate_devices = multipath_iterate_devices,
 	.busy = multipath_busy,
