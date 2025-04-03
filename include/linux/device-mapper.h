@@ -637,6 +637,14 @@ struct dm_table *dm_swap_table(struct mapped_device *md,
 void dm_destroy_crypto_profile(struct blk_crypto_profile *profile);
 
 /*
+ * Handle a device-mapper ioctl.
+ * @file and @bdev specify the target device file: @file when the ioctl was
+ * issued to the control device, @bdev when it was issued to a DM block device.
+ */
+int dm_ioctl(struct file *file, struct block_device *bdev,
+	     uint command, struct dm_ioctl __user *user);
+
+/*
  *---------------------------------------------------------------
  * Macros.
  *---------------------------------------------------------------

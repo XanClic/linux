@@ -1850,6 +1850,11 @@ static int target_message(struct file *filp, struct dm_ioctl *param, size_t para
  */
 #define IOCTL_FLAGS_NO_PARAMS		1
 #define IOCTL_FLAGS_ISSUE_GLOBAL_EVENT	2
+/*
+ * This command is allowed to be issued to a block device.
+ * When done so, it does not require CAP_SYS_ADMIN.
+ */
+#define IOCTL_FLAGS_BLOCK_TARGET	4
 
 /*
  *---------------------------------------------------------------
@@ -2043,7 +2048,8 @@ static int validate_params(uint cmd, struct dm_ioctl *param)
 	return 0;
 }
 
-static int ctl_ioctl(struct file *file, uint command, struct dm_ioctl __user *user)
+int dm_ioctl(struct file *file, struct block_device *bdev,
+	     uint command, struct dm_ioctl __user *user)
 {
 	int r = 0;
 	int ioctl_flags;
@@ -2053,9 +2059,14 @@ static int ctl_ioctl(struct file *file, uint command, struct dm_ioctl __user *us
 	ioctl_fn fn = NULL;
 	size_t input_param_size;
 	struct dm_ioctl param_kernel;
+	bool control_device = !bdev;
+
+	/* either one must be set, not both */
+	if (file && bdev)
+		return -EINVAL;
 
 	/* only root can play with this */
-	if (!capable(CAP_SYS_ADMIN))
+	if (control_device && !capable(CAP_SYS_ADMIN))
 		return -EACCES;
 
 	if (_IOC_TYPE(command) != DM_IOCTL)
@@ -2083,6 +2094,12 @@ static int ctl_ioctl(struct file *file, uint command, struct dm_ioctl __user *us
 		return -ENOTTY;
 	}
 
+	if (!control_device && !(ioctl_flags & IOCTL_FLAGS_BLOCK_TARGET)) {
+		DMERR("dm_ioctl: invoked control ioctl 0x%x on block device",
+		      command);
+		return -ENOTTY;
+	}
+
 	/*
 	 * Copy the parameters into kernel space.
 	 */
@@ -2090,6 +2107,15 @@ static int ctl_ioctl(struct file *file, uint command, struct dm_ioctl __user *us
 
 	if (r)
 		return r;
+
+	if (bdev) {
+		if (param->name[0] || param->uuid[0] || param->dev) {
+			r = -EINVAL;
+			goto out;
+		}
+
+		param->dev = huge_encode_dev(bdev->bd_dev);
+	}
 
 	input_param_size = param->data_size;
 	r = validate_params(cmd, param);
@@ -2116,10 +2142,11 @@ out:
 	free_params(param, input_param_size, param_flags);
 	return r;
 }
+EXPORT_SYMBOL_GPL(dm_ioctl);
 
 static long dm_ctl_ioctl(struct file *file, uint command, ulong u)
 {
-	return (long)ctl_ioctl(file, command, (struct dm_ioctl __user *)u);
+	return (long)dm_ioctl(file, NULL, command, (struct dm_ioctl __user *)u);
 }
 
 #ifdef CONFIG_COMPAT
