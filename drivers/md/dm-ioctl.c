@@ -1761,8 +1761,11 @@ static int message_for_md(struct mapped_device *md, unsigned int argc, char **ar
 
 /*
  * Pass a message to the target that's at the supplied device offset.
+ * @control_device reflects whether the message was sent to the control or a
+ * block device.
  */
-static int target_message(struct file *filp, struct dm_ioctl *param, size_t param_size)
+static int target_message(struct file *filp, struct dm_ioctl *param,
+			  size_t param_size, bool control_device)
 {
 	int r, argc;
 	char **argv;
@@ -1797,9 +1800,11 @@ static int target_message(struct file *filp, struct dm_ioctl *param, size_t para
 		goto out_argv;
 	}
 
-	r = message_for_md(md, argc, argv, result, maxlen);
-	if (r <= 1)
-		goto out_argv;
+	if (control_device) {
+		r = message_for_md(md, argc, argv, result, maxlen);
+		if (r <= 1)
+			goto out_argv;
+	}
 
 	table = dm_get_live_table(md, &srcu_idx);
 	if (!table)
@@ -1814,8 +1819,10 @@ static int target_message(struct file *filp, struct dm_ioctl *param, size_t para
 	if (!ti) {
 		DMERR("Target message sector outside device.");
 		r = -EINVAL;
-	} else if (ti->type->message)
+	} else if (control_device && ti->type->message)
 		r = ti->type->message(ti, argc, argv, result, maxlen);
+	else if (!control_device && ti->type->block_message)
+		r = ti->type->block_message(ti, argc, argv, result, maxlen);
 	else {
 		DMERR("Target type does not support messages");
 		r = -EINVAL;
@@ -1842,6 +1849,18 @@ static int target_message(struct file *filp, struct dm_ioctl *param, size_t para
 	return r;
 }
 
+static int control_target_message(struct file *filp, struct dm_ioctl *param,
+				  size_t param_size)
+{
+	return target_message(filp, param, param_size, true);
+}
+
+static int block_target_message(struct file *filp, struct dm_ioctl *param,
+				size_t param_size)
+{
+	return target_message(filp, param, param_size, false);
+}
+
 /*
  * The ioctl parameter block consists of two parts, a dm_ioctl struct
  * followed by a data buffer.  This flag is set if the second part,
@@ -1850,6 +1869,7 @@ static int target_message(struct file *filp, struct dm_ioctl *param, size_t para
  */
 #define IOCTL_FLAGS_NO_PARAMS		1
 #define IOCTL_FLAGS_ISSUE_GLOBAL_EVENT	2
+#define IOCTL_FLAGS_BLOCK_TARGET	4
 
 /*
  *---------------------------------------------------------------
@@ -1881,10 +1901,12 @@ static ioctl_fn lookup_ioctl(unsigned int cmd, int *ioctl_flags)
 
 		{DM_LIST_VERSIONS_CMD, 0, list_versions},
 
-		{DM_TARGET_MSG_CMD, 0, target_message},
+		{DM_TARGET_MSG_CMD, 0, control_target_message},
 		{DM_DEV_SET_GEOMETRY_CMD, 0, dev_set_geometry},
 		{DM_DEV_ARM_POLL_CMD, IOCTL_FLAGS_NO_PARAMS, dev_arm_poll},
 		{DM_GET_TARGET_VERSION_CMD, 0, get_target_version},
+
+		{DM_BLOCK_TARGET_MSG_CMD, IOCTL_FLAGS_BLOCK_TARGET, block_target_message},
 	};
 
 	if (unlikely(cmd >= ARRAY_SIZE(_ioctls)))
@@ -2043,7 +2065,8 @@ static int validate_params(uint cmd, struct dm_ioctl *param)
 	return 0;
 }
 
-static int ctl_ioctl(struct file *file, uint command, struct dm_ioctl __user *user)
+int dm_ioctl(struct file *file, struct block_device *bdev,
+	     uint command, struct dm_ioctl __user *user)
 {
 	int r = 0;
 	int ioctl_flags;
@@ -2053,9 +2076,10 @@ static int ctl_ioctl(struct file *file, uint command, struct dm_ioctl __user *us
 	ioctl_fn fn = NULL;
 	size_t input_param_size;
 	struct dm_ioctl param_kernel;
+	bool control_device = !bdev;
 
 	/* only root can play with this */
-	if (!capable(CAP_SYS_ADMIN))
+	if (control_device && !capable(CAP_SYS_ADMIN))
 		return -EACCES;
 
 	if (_IOC_TYPE(command) != DM_IOCTL)
@@ -2079,7 +2103,13 @@ static int ctl_ioctl(struct file *file, uint command, struct dm_ioctl __user *us
 
 	fn = lookup_ioctl(cmd, &ioctl_flags);
 	if (!fn) {
-		DMERR("dm_ctl_ioctl: unknown command 0x%x", command);
+		DMERR("dm_ioctl: unknown command 0x%x", command);
+		return -ENOTTY;
+	}
+
+	if (bdev && !(ioctl_flags & IOCTL_FLAGS_BLOCK_TARGET)) {
+		DMERR("dm_ioctl: invoked control ioctl 0x%x on block device",
+		      command);
 		return -ENOTTY;
 	}
 
@@ -2090,6 +2120,15 @@ static int ctl_ioctl(struct file *file, uint command, struct dm_ioctl __user *us
 
 	if (r)
 		return r;
+
+	if (bdev) {
+		if (param->name[0] || param->uuid[0] || param->dev) {
+			r = -EINVAL;
+			goto out;
+		}
+
+		param->dev = huge_encode_dev(bdev->bd_dev);
+	}
 
 	input_param_size = param->data_size;
 	r = validate_params(cmd, param);
@@ -2116,10 +2155,11 @@ out:
 	free_params(param, input_param_size, param_flags);
 	return r;
 }
+EXPORT_SYMBOL_GPL(dm_ioctl);
 
 static long dm_ctl_ioctl(struct file *file, uint command, ulong u)
 {
-	return (long)ctl_ioctl(file, command, (struct dm_ioctl __user *)u);
+	return (long)dm_ioctl(file, NULL, command, (struct dm_ioctl __user *)u);
 }
 
 #ifdef CONFIG_COMPAT

@@ -215,6 +215,7 @@ struct target_type {
 	dm_dax_direct_access_fn direct_access;
 	dm_dax_zero_page_range_fn dax_zero_page_range;
 	dm_dax_recovery_write_fn dax_recovery_write;
+	dm_message_fn block_message;
 
 	/* For internal device-mapper use. */
 	struct list_head list;
@@ -635,6 +636,14 @@ struct dm_table *dm_swap_table(struct mapped_device *md,
  * Table blk_crypto_profile functions
  */
 void dm_destroy_crypto_profile(struct blk_crypto_profile *profile);
+
+/*
+ * Handle a device-mapper ioctl.
+ * @file and @bdev specify the target device file: @file when the ioctl was
+ * issued to the control device, @bdev when it was issued to a DM block device.
+ */
+int dm_ioctl(struct file *file, struct block_device *bdev,
+	     uint command, struct dm_ioctl __user *user);
 
 /*
  *---------------------------------------------------------------
