@@ -215,6 +215,7 @@ struct target_type {
 	dm_dax_direct_access_fn direct_access;
 	dm_dax_zero_page_range_fn dax_zero_page_range;
 	dm_dax_recovery_write_fn dax_recovery_write;
+	dm_message_fn block_message;
 
 	/* For internal device-mapper use. */
 	struct list_head list;
