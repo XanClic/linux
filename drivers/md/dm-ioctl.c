@@ -1842,6 +1842,52 @@ static int target_message(struct file *filp, struct dm_ioctl *param, size_t para
 	return r;
 }
 
+static int mpath_probe_paths(struct file *filp, struct dm_ioctl *param, size_t param_size)
+{
+	int r, ti_ret;
+	struct mapped_device *md;
+	struct dm_table *table;
+	struct dm_target *ti;
+	int srcu_idx;
+	unsigned int i;
+
+	md = find_device(param);
+	if (!md)
+		return -ENXIO;
+
+	table = dm_get_live_table(md, &srcu_idx);
+	if (!table)
+		goto out_table;
+
+	if (dm_deleting_md(md)) {
+		r = -ENXIO;
+		goto out_table;
+	}
+
+	/*
+	 * Probe all targets, abort on any error other than -ENOTCONN; if any
+	 * target returns -ENOTCONN, we will also return -ENOTCONN.
+	 * That is, we will only return 0 if all targets (that support the
+	 * .probe_paths call) return a non-negative result.
+	 */
+	r = 0;
+	for (i = 0; i < table->num_targets; i++) {
+		ti = dm_table_get_target(table, i);
+		if (ti->type->probe_paths) {
+			ti_ret = ti->type->probe_paths(ti);
+			if (ti_ret < 0)
+				r = ti_ret;
+			if (r < 0 && r != -ENOTCONN)
+				break;
+		}
+	}
+
+out_table:
+	dm_put_live_table(md, srcu_idx);
+	dm_put(md);
+	return r;
+}
+
 /*
  * The ioctl parameter block consists of two parts, a dm_ioctl struct
  * followed by a data buffer.  This flag is set if the second part,
@@ -1890,6 +1936,7 @@ static ioctl_fn lookup_ioctl(unsigned int cmd, int *ioctl_flags)
 		{DM_DEV_SET_GEOMETRY_CMD, 0, dev_set_geometry},
 		{DM_DEV_ARM_POLL_CMD, IOCTL_FLAGS_NO_PARAMS, dev_arm_poll},
 		{DM_GET_TARGET_VERSION_CMD, 0, get_target_version},
+		{DM_MPATH_PROBE_PATHS_CMD, IOCTL_FLAGS_BLOCK_TARGET, mpath_probe_paths},
 	};
 
 	if (unlikely(cmd >= ARRAY_SIZE(_ioctls)))

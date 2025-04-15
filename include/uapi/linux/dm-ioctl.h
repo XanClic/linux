@@ -92,6 +92,12 @@
  * for compatibility with dm devices that can be booted by a PC
  * BIOS.  See struct hd_geometry for range limits.  Also note that
  * the geometry is erased if the device size changes.
+ *
+ * DM_MPATH_PROBE_PATHS:
+ * For multipath: Probe all active paths in the current priority group to see
+ * whether they still work, and fail them if not.  Return -ENOTCONN if no
+ * working path was found and there is also no active path left in any other
+ * priority group.
  */
 
 /*
@@ -258,6 +264,7 @@ enum {
 	DM_DEV_SET_GEOMETRY_CMD,
 	DM_DEV_ARM_POLL_CMD,
 	DM_GET_TARGET_VERSION_CMD,
+	DM_MPATH_PROBE_PATHS_CMD,
 };
 
 #define DM_IOCTL 0xfd
@@ -284,11 +291,12 @@ enum {
 
 #define DM_TARGET_MSG	 _IOWR(DM_IOCTL, DM_TARGET_MSG_CMD, struct dm_ioctl)
 #define DM_DEV_SET_GEOMETRY	_IOWR(DM_IOCTL, DM_DEV_SET_GEOMETRY_CMD, struct dm_ioctl)
+#define DM_MPATH_PROBE_PATHS	_IOWR(DM_IOCTL, DM_MPATH_PROBE_PATHS_CMD, struct dm_ioctl)
 
 #define DM_VERSION_MAJOR	4
-#define DM_VERSION_MINOR	49
+#define DM_VERSION_MINOR	50
 #define DM_VERSION_PATCHLEVEL	0
-#define DM_VERSION_EXTRA	"-ioctl (2025-01-17)"
+#define DM_VERSION_EXTRA	"-ioctl (2025-04-28)"
 
 /* Status bits */
 #define DM_READONLY_FLAG	(1 << 0) /* In/Out */
