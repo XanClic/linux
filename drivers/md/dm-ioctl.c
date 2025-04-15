@@ -1773,6 +1773,7 @@ static int target_message(struct file *filp, struct dm_ioctl *param, size_t para
 	size_t maxlen;
 	char *result = get_result_buffer(param, param_size, &maxlen);
 	int srcu_idx;
+	bool control_device = filp != NULL;
 
 	md = find_device(param);
 	if (!md)
@@ -1797,9 +1798,12 @@ static int target_message(struct file *filp, struct dm_ioctl *param, size_t para
 		goto out_argv;
 	}
 
-	r = message_for_md(md, argc, argv, result, maxlen);
-	if (r <= 1)
-		goto out_argv;
+	/* Require DM core messages to be sent to the control device */
+	if (control_device) {
+		r = message_for_md(md, argc, argv, result, maxlen);
+		if (r <= 1)
+			goto out_argv;
+	}
 
 	table = dm_get_live_table(md, &srcu_idx);
 	if (!table)
@@ -1814,8 +1818,10 @@ static int target_message(struct file *filp, struct dm_ioctl *param, size_t para
 	if (!ti) {
 		DMERR("Target message sector outside device.");
 		r = -EINVAL;
-	} else if (ti->type->message)
+	} else if (control_device && ti->type->message)
 		r = ti->type->message(ti, argc, argv, result, maxlen);
+	else if (!control_device && ti->type->block_message)
+		r = ti->type->block_message(ti, argc, argv, result, maxlen);
 	else {
 		DMERR("Target type does not support messages");
 		r = -EINVAL;
@@ -1886,7 +1892,7 @@ static ioctl_fn lookup_ioctl(unsigned int cmd, int *ioctl_flags)
 
 		{DM_LIST_VERSIONS_CMD, 0, list_versions},
 
-		{DM_TARGET_MSG_CMD, 0, target_message},
+		{DM_TARGET_MSG_CMD, IOCTL_FLAGS_BLOCK_TARGET, target_message},
 		{DM_DEV_SET_GEOMETRY_CMD, 0, dev_set_geometry},
 		{DM_DEV_ARM_POLL_CMD, IOCTL_FLAGS_NO_PARAMS, dev_arm_poll},
 		{DM_GET_TARGET_VERSION_CMD, 0, get_target_version},
